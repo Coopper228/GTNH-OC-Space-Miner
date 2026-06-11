@@ -1,7 +1,7 @@
 # Web configurator descriptor for the GTNH Space Miner controller.
 #
 # Hosted at the repo root and fetched (raw) by the GTNH-OC-Web-Configurator:
-#   https://navatusein.github.io/GTNH-OC-Web-Configurator/#/configurator?url=<raw url of this file>
+#   https://coopper228.github.io/GTNH-OC-Web-Configurator/#/configurator?url=<raw url of this file>
 #
 # The site renders a form from `fieldGroups`, then substitutes the filled
 # values into `configTemplate` wherever it finds <field>KEY</field>, and hands
