@@ -1,0 +1,55 @@
+name: Release
+
+# Builds the installable archive and publishes it as a GitHub Release asset
+# named SpaceMiner.tar — the exact name the in-game installer and the
+# self-updater download from
+#   https://github.com/Coopper228/GTNH-OC-Space-Miner/releases/latest/download/SpaceMiner.tar
+#
+# Two ways to trigger:
+#   * Push a version tag:   git tag v1.0.0 && git push origin v1.0.0
+#   * Manually:             Actions tab → Release → "Run workflow" → enter a tag
+#
+# Bump programVersion in version.lua before releasing (and configVersion only if
+# the config format changed incompatibly).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pack every Lua file at the repo root into a flat tar. The installer
+      # extracts it straight into /home, so files must sit at the archive root
+      # (no leading directory) for require("config") etc. to resolve.
+      # Fails loudly if no .lua files are found (wrong repo layout).
+      - name: Build archive
+        run: |
+          shopt -s nullglob
+          files=(*.lua)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No .lua files at repo root. Program files must be flat at the root, not in a subfolder."
+            exit 1
+          fi
+          tar -cvf SpaceMiner.tar "${files[@]}"
+          echo "Archived ${#files[@]} files."
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: SpaceMiner.tar
