@@ -25,9 +25,9 @@ local config     = require("config")
 
 local M = {}
 
--- GitHub repository that hosts this program, "owner/name". PLACEHOLDER — set
--- this (and the release archive name) in config.lua once the repo exists.
-local REPO    = config.update_repo    or "YOUR_USER/GTNH-OC-Space-Miner"
+-- GitHub repository that hosts this program, "owner/name", and the release
+-- archive name. Overridable from config.lua; defaults below are the real repo.
+local REPO    = config.update_repo    or "Coopper228/GTNH-OC-Space-Miner"
 local ARCHIVE = config.update_archive or "SpaceMiner"
 
 local RAW_VERSION_URL =

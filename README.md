@@ -5,9 +5,6 @@ It auto-detects the miner hardware, keeps a configurable set of ores stocked
 from the ME network, and meters mining drones through a buffer chest so a
 single drone is delivered to each miner (no stackable-drone flooding).
 
-> Replace `YOUR_USER/GTNH-OC-Space-Miner` everywhere (this README,
-> `config.lua`, `config-descriptor.yml`) with your actual GitHub repository.
-
 ## Hardware
 
 Per miner (auto-detected, no addresses to enter):
@@ -32,7 +29,7 @@ miner; the transposer's chest/interface sides are told apart automatically.
 Run the installer and pick **Space Miner**:
 
 ```
-pastebin run ESUAMAGx
+pastebin run 8t6B7HC5
 ```
 
 Say **yes** to autorun so it launches on boot (writes `/home/.shrc` = `main`).
@@ -40,7 +37,7 @@ Say **yes** to autorun so it launches on boot (writes `/home/.shrc` = `main`).
 Or install directly without the menu:
 
 ```
-wget -f https://github.com/YOUR_USER/GTNH-OC-Space-Miner/releases/latest/download/SpaceMiner.tar /home/program.tar
+wget -f https://github.com/Coopper228/GTNH-OC-Space-Miner/releases/latest/download/SpaceMiner.tar /home/program.tar
 cd /home && tar -xf program.tar && rm program.tar
 ```
 
@@ -53,7 +50,7 @@ the program sweeps them into the buffer chest on the first scan afterwards.
 Use the web configurator (no in-game editing needed):
 
 ```
-https://navatusein.github.io/GTNH-OC-Web-Configurator/#/configurator?url=https://raw.githubusercontent.com/YOUR_USER/GTNH-OC-Space-Miner/main/config-descriptor.yml
+https://navatusein.github.io/GTNH-OC-Web-Configurator/#/configurator?url=https://raw.githubusercontent.com/Coopper228/GTNH-OC-Space-Miner/main/config-descriptor.yml
 ```
 
 Set the timings and the **ore targets** (label / target / priority), then
@@ -91,8 +88,8 @@ Add this to the installer's `programs.yml`
 ```yaml
 - name: Space Miner
   description: Automated GTNH Space Elevator space mining controller
-  archiveUrl: https://github.com/YOUR_USER/GTNH-OC-Space-Miner/releases/latest/download/SpaceMiner.tar
-  configDescriptorUrl: https://raw.githubusercontent.com/YOUR_USER/GTNH-OC-Space-Miner/main/config-descriptor.yml
+  archiveUrl: https://github.com/Coopper228/GTNH-OC-Space-Miner/releases/latest/download/SpaceMiner.tar
+  configDescriptorUrl: https://raw.githubusercontent.com/Coopper228/GTNH-OC-Space-Miner/main/config-descriptor.yml
 ```
 
 And the legacy `programs.lua`:
@@ -101,7 +98,7 @@ And the legacy `programs.lua`:
 {
   name = "Space Miner",
   description = "Automated GTNH Space Elevator space mining controller",
-  url = "https://github.com/YOUR_USER/GTNH-OC-Space-Miner/releases/latest/download/SpaceMiner.tar"
+  url = "https://github.com/Coopper228/GTNH-OC-Space-Miner/releases/latest/download/SpaceMiner.tar"
 }
 ```
 
@@ -111,10 +108,14 @@ All program files live at the **repo root** (flat), because the tar is extracted
 straight into `/home`:
 
 ```
-main.lua  config.lua  ores.lua  mining.lua  scheduler.lua  search.lua
+main.lua  config.lua  asteroids.lua  mining.lua  scheduler.lua  search.lua
 lookup.lua  equipment.lua  dronebuffer.lua  updater.lua  version.lua
-asteroids_mk1.lua  asteroids_mk2.lua  asteroids_mk3.lua
 config-descriptor.yml          # web configurator schema (root, raw-fetched)
 version.lua                     # current version (root, raw-fetched)
 .github/workflows/release.yml   # release builder
 ```
+
+`asteroids.lua` holds all per-asteroid static data: the drone chance/distance
+tables for each miner tier and the ore catalog (merged from the former
+`asteroids_mk1/2/3.lua` and `ores.lua`).
+

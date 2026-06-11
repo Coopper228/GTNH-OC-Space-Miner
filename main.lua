@@ -10,8 +10,7 @@
 
 -- Clear module cache so edits to any file take effect without reboot.
 for _, mod in ipairs({
-    "config", "ores", "version", "updater",
-    "asteroids_mk1", "asteroids_mk2", "asteroids_mk3",
+    "config", "asteroids", "version", "updater",
     "equipment", "lookup", "scheduler", "dronebuffer", "mining", "search",
 }) do
     package.loaded[mod] = nil
@@ -23,7 +22,7 @@ local filesystem = require("filesystem")
 local term       = require("term")
 
 local config      = require("config")
-local ores        = require("ores")
+local asteroids   = require("asteroids")
 local updater     = require("updater")
 local equipment   = require("equipment")
 local lookup      = require("lookup")
@@ -106,21 +105,17 @@ print(string.format("[setup] Loaded %d miner(s) from config.", #minerList))
 
 -- Overlay the configured ore targets onto the static asteroid catalog before
 -- building the scan/scheduler lists.
-ores.applyTargets(config.ore_targets)
+asteroids.applyTargets(config.ore_targets)
 
-local lookupList     = ores.buildLookupList()
-local oresByAsteroid = ores.buildOresByAsteroid()
+local lookupList     = asteroids.buildLookupList()
+local oresByAsteroid = asteroids.buildOresByAsteroid()
 
 if #lookupList == 0 then
-    print("[setup] WARNING: No ores have target > 0 in ores.lua.")
-    print("        Edit ores.lua and set target/priority values, then restart.")
+    print("[setup] WARNING: No ores have target > 0 in config.ore_targets.")
+    print("        Set ore targets via the web configurator (or config.lua), then restart.")
 end
 
-local chanceTables = {
-    projectmoduleminert1 = require("asteroids_mk1"),
-    projectmoduleminert2 = require("asteroids_mk2"),
-    projectmoduleminert3 = require("asteroids_mk3"),
-}
+local chanceTables = asteroids.chances
 
 dronebuffer.init(droneConfig, dbAddr)
 mining.init(minerList, dbAddr)

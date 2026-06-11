@@ -12,7 +12,7 @@ descriptor:
     Configuration for the automated Space Elevator Space Miner controller.
     Hardware (miners, redstone I/O, ME interfaces, drone buffer) is auto-detected
     in-game, so only timings and ore targets are set here.
-  repositoryLink: "https://github.com/YOUR_USER/GTNH-OC-Space-Miner"
+  repositoryLink: "https://github.com/Coopper228/GTNH-OC-Space-Miner"
 
   configTemplate: |
     -- Space Miner controller configuration.
@@ -66,7 +66,7 @@ descriptor:
           type: string
           label: "GitHub repository"
           description: 'Repo in "owner/name" form that hosts releases and version.lua.'
-          default: "YOUR_USER/GTNH-OC-Space-Miner"
+          default: "Coopper228/GTNH-OC-Space-Miner"
         - key: update_archive
           type: string
           label: "Release archive name"
@@ -185,7 +185,7 @@ descriptor:
       name: "Ore targets"
       description: >-
         The ores to keep stocked. Only ores listed here are mined. Label must
-        match an in-game item name from the asteroid catalog (ores.lua).
+        match an in-game item name from the asteroid catalog (asteroids.lua).
       defaultOpen: true
       fields:
         - key: ore_targets
