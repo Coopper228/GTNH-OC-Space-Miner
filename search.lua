@@ -328,6 +328,42 @@ local function detectDroneBuffer(ifaces, results)
     }
 end
 
+-- In normal operation drones rest in the buffer chest, but the detection passes
+-- need them in the ME network (so stocked interfaces can light their miners).
+-- Move every drone from the chest into the network via the transposer + drone
+-- interface. After startup, reclaim() moves them back to the chest.
+local function primeNetwork()
+    local tpAddr
+    for addr in component.list("transposer") do tpAddr = addr; break end
+    if not tpAddr then
+        log("[search] WARNING: no transposer — put drones in the ME network manually before search.")
+        return
+    end
+
+    local tp = component.proxy(tpAddr)
+    local chestSide, ifaceSide = classifySides(tp)
+    if not chestSide or not ifaceSide then
+        log("[search] WARNING: can't identify chest/interface sides — put drones in the ME network manually.")
+        return
+    end
+
+    local moved = 0
+    local size = tp.getInventorySize(chestSide)
+    for slot = 1, size do
+        local st = tp.getStackInSlot(chestSide, slot)
+        if st and st.name == ae.DRONE_ITEM then
+            moved = moved + (tp.transferItem(chestSide, ifaceSide, st.size or 64, slot) or 0)
+        end
+    end
+
+    if moved > 0 then
+        log("[search] Moved %d drone(s) from the buffer chest into the network for detection.", moved)
+        os.sleep(1)   -- let AE2 import them
+    else
+        log("[search] No drones in the buffer chest (assuming they are already in the network).")
+    end
+end
+
 -- ── Entry point ───────────────────────────────────────────────────────────────
 
 function M.runSearch()
@@ -352,6 +388,18 @@ function M.runSearch()
     -- so all Input Buses drain back into their ME Interfaces.
     log("[search] Deactivating all Redstone I/O and clearing interfaces...")
     drainAll(ifaces, redstones)
+
+    -- Drones the passes need may be resting in the buffer chest — move them into
+    -- the network first.
+    primeNetwork()
+
+    -- The passes stock every interface (drones get held in miner buses until
+    -- drained), so detection needs roughly one MK-I drone per interface.
+    local lvDrones = ae.getNetworkDrones()[0] or 0
+    if lvDrones < #ifaces then
+        log("[search] NOTE: only %d MK-I drone(s) in the network for %d interface(s).", lvDrones, #ifaces)
+        log("[search]       Detection needs ~1 per interface — add more MK-I drones if miners are missed.")
+    end
 
     local ifaceByMiner    = linkInterfaces(ifaces, miners, redstones, dbAddr, items)
     local redstoneByMiner = linkRedstones(ifaces, miners, redstones, dbAddr, items)
