@@ -11,6 +11,6 @@
 --                    config.old.lua and asks them to rewrite it by hand instead
 --                    of silently restoring an incompatible config.
 return {
-    programVersion = "1.1.1",
+    programVersion = "1.1.2",
     configVersion  = 1,
 }
