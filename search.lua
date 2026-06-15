@@ -342,11 +342,12 @@ local function detectDroneBuffer(ifaces, results)
     }
 end
 
--- In normal operation drones rest in the buffer chest, but the detection passes
--- need them in the ME network (so stocked interfaces can light their miners).
--- Move every drone from the chest into the network via the transposer + drone
--- interface. After startup, reclaim() moves them back to the chest.
-local function primeNetwork()
+-- Move exactly `need` LV drones into the ME network for detection passes.
+-- Already-in-network drones count toward the target so we never overshoot.
+-- Moving the minimum avoids the flood: with >1 drone in the network, a stocked
+-- ME Interface (count=1) acts as a pump — AE2 keeps refilling the slot the
+-- instant the pipe drains it, emptying the entire network into one bus.
+local function primeNetwork(need)
     local tpAddr
     for addr in component.list("transposer") do tpAddr = addr; break end
     if not tpAddr then
@@ -361,20 +362,31 @@ local function primeNetwork()
         return
     end
 
+    -- Count drones already in the network so we don't overshoot.
+    local inNet = 0
+    for _, c in pairs(ae.getNetworkDrones()) do inNet = inNet + c end
+    local toMove = need - inNet
+    if toMove <= 0 then
+        log("[search] Network already has %d drone(s) (need %d). Skipping prime.", inNet, need)
+        return
+    end
+
     local moved = 0
     local size = tp.getInventorySize(chestSide)
     for slot = 1, size do
+        if moved >= toMove then break end
         local st = tp.getStackInSlot(chestSide, slot)
         if st and st.name == ae.DRONE_ITEM then
-            moved = moved + (tp.transferItem(chestSide, ifaceSide, st.size or 64, slot) or 0)
+            local want = math.min(toMove - moved, st.size or 1)
+            moved = moved + (tp.transferItem(chestSide, ifaceSide, want, slot) or 0)
         end
     end
 
     if moved > 0 then
-        log("[search] Moved %d drone(s) from the buffer chest into the network for detection.", moved)
-        os.sleep(1)   -- let AE2 import them
-    else
-        log("[search] No drones in the buffer chest (assuming they are already in the network).")
+        log("[search] Moved %d drone(s) into the network (need %d for detection).", moved, need)
+        os.sleep(1)
+    elseif inNet == 0 then
+        log("[search] WARNING: no LV drones in chest or network — detection will fail.")
     end
 end
 
@@ -403,31 +415,25 @@ function M.runSearch()
     log("[search] Deactivating all Redstone I/O and clearing interfaces...")
     drainAll(ifaces, redstones)
 
-    -- Drones the passes need may be resting in the buffer chest — move them into
-    -- the network first.
-    primeNetwork()
-
-    -- Pass A reuses 1 drone for all interfaces (drain between iterations).
-    -- Pass B needs 1 drone per miner interface simultaneously.
-    -- N miners = N miner interfaces = N drones minimum.
-    local lvDrones = ae.getNetworkDrones()[0] or 0
+    -- Pass A reuses exactly 1 drone across all iterations (drain between each).
+    -- Pass B needs 1 drone per miner simultaneously.
     local minerCount = #miners
+    log("[search] Priming network with 1 drone for Pass A...")
+    primeNetwork(1)
+
+    local lvDrones = ae.getNetworkDrones()[0] or 0
     if lvDrones < 1 then
-        log("[search] WARNING: no MK-I drones in the network. Search will fail.")
-        log("[search]          Add MK-I drones to the buffer chest and try again.")
-    elseif lvDrones < minerCount then
-        log("[search] NOTE: only %d MK-I drone(s) in the network; Pass B needs %d (1 per miner).", lvDrones, minerCount)
-        log("[search]       Pass A will work (1 drone reused). Pass B may miss miners without enough drones.")
+        log("[search] ERROR: no MK-I drones available. Add drones to the buffer chest and retry.")
+        return
     end
 
-    local ifaceByMiner    = linkInterfaces(ifaces, miners, redstones, dbAddr, items)
+    local ifaceByMiner = linkInterfaces(ifaces, miners, redstones, dbAddr, items)
 
-    -- After Pass A each drone has been consumed by a miner bus or drained back
-    -- into the network. drainAll at the end of linkInterfaces clears the network.
-    -- Move all drones from the chest into the network again so Pass B can stock
-    -- every interface simultaneously.
-    log("[search] Re-priming network for Pass B...")
-    primeNetwork()
+    -- After Pass A the 1 drone is back in the network (returned via drain).
+    -- Prime network up to minerCount so Pass B can stock every miner interface
+    -- simultaneously without flooding any single bus.
+    log("[search] Re-priming network with %d drone(s) for Pass B...", minerCount)
+    primeNetwork(minerCount)
 
     -- Detect the spare drone interface before Pass B so we can exclude it from
     -- stocking (it would silently absorb a drone from the network if stocked).
