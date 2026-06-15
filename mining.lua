@@ -103,14 +103,22 @@ local function reclaim()
         local net = ae.getNetworkDrones()
         if next(net) == nil then break end
 
+        -- Also sweep the drone interface slot itself: if AE2 hasn't imported a
+        -- drone yet (it's physically in the interface but not in the network),
+        -- pull it directly to the chest first.
+        local ifaceStack = buf.tp.getStackInSlot(buf.ifaceSide, SLOT_DRONE)
+        if ifaceStack and ifaceStack.name == ae.DRONE_ITEM then
+            local moved = buf.tp.transferItem(buf.ifaceSide, buf.chestSide, 64, SLOT_DRONE) or 0
+            if moved > 0 then total = total + moved end
+        end
+
         local progressed = false
         for dmg in pairs(net) do
             local dbSlot = buf.damageToDb[dmg]
             if not dbSlot then
                 dbg("reclaim: no db slot for drone damage %d", dmg)
+                progressed = true   -- don't stall the loop on unknown tiers
             else
-                -- Ask the drone interface to stock these drones from the network
-                -- into its buffer, where the transposer can grab them.
                 buf.iface.setInterfaceConfiguration(SLOT_DRONE, buf.dbAddr, dbSlot, 64)
 
                 local t = 0
@@ -121,7 +129,7 @@ local function reclaim()
                 end
 
                 local moved = buf.tp.transferItem(buf.ifaceSide, buf.chestSide, 64, SLOT_DRONE) or 0
-                buf.iface.setInterfaceConfiguration(SLOT_DRONE)   -- stop stocking
+                buf.iface.setInterfaceConfiguration(SLOT_DRONE)
 
                 if moved > 0 then total = total + moved; progressed = true end
             end

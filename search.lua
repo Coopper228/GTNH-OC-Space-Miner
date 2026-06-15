@@ -184,7 +184,14 @@ local function linkInterfaces(ifaces, miners, redstones, dbAddr, items)
             io.write("no miner activated\n")
         end
 
-        clearIface(iface)  -- stop stocking; its bus contents get consumed/drained later
+        -- Drop all signals so the bus drains back into the interface, which
+        -- releases the drone back into the network for the next iteration.
+        -- Without this, the drone stays in the bus (signal stays HIGH) and
+        -- the next interface has nothing to give its miner.
+        clearIface(iface)
+        setAllSignals(redstones, 0)
+        os.sleep(DRAIN_TIME)
+        setAllSignals(redstones, RS_ON)
     end
 
     drainAll(ifaces, redstones)
@@ -193,23 +200,27 @@ end
 
 -- ── Pass B: redstone → miner ────────────────────────────────────────────────
 
-local function linkRedstones(ifaces, miners, redstones, dbAddr, items)
+-- Pass B stocks miner interfaces only (excludes the spare drone interface so it
+-- doesn't silently consume a drone from the network).
+local function linkRedstones(ifaces, miners, redstones, dbAddr, items, droneIfaceAddr)
     log("[Pass B] Linking %d redstone I/O to miners...", #redstones)
 
-    setAllSignals(redstones, 0)   -- signals low: stocked items wait in interfaces
+    setAllSignals(redstones, 0)
 
-    -- Stock every interface; with signals low the items stay in the interface
-    -- and only flow once that interface's redstone goes high.
-    for _, iface in ipairs(ifaces) do stockIface(iface, dbAddr, items) end
+    for _, iface in ipairs(ifaces) do
+        if iface.address ~= droneIfaceAddr then
+            stockIface(iface, dbAddr, items)
+        end
+    end
     os.sleep(STOCK_TIME)
 
-    local redstoneByMiner = {}   -- [minerAddr] = redstoneAddr
-    local linked          = {}   -- [minerAddr] = true
+    local redstoneByMiner = {}
+    local linked          = {}
 
     for idx, rs in ipairs(redstones) do
         io.write(string.format("  [%d/%d] redstone %s -> ", idx, #redstones, rs.address:sub(1, 8)))
 
-        armMiners(miners)        -- (re)allow work so the fed miner starts
+        armMiners(miners)
         setSignal(rs, RS_ON)
 
         local m = waitForActiveMiner(miners, linked, START_TIME)
@@ -221,7 +232,10 @@ local function linkRedstones(ifaces, miners, redstones, dbAddr, items)
             io.write("no miner activated\n")
         end
 
-        setSignal(rs, 0)  -- drain this bus back before testing the next redstone
+        -- Drop the signal and wait for the bus to drain back so the drone
+        -- returns to the network before the next redstone is tested.
+        setSignal(rs, 0)
+        os.sleep(DRAIN_TIME)
     end
 
     drainAll(ifaces, redstones)
@@ -393,16 +407,40 @@ function M.runSearch()
     -- the network first.
     primeNetwork()
 
-    -- The passes stock every interface (drones get held in miner buses until
-    -- drained), so detection needs roughly one MK-I drone per interface.
+    -- Pass A reuses 1 drone for all interfaces (drain between iterations).
+    -- Pass B needs 1 drone per miner interface simultaneously.
+    -- N miners = N miner interfaces = N drones minimum.
     local lvDrones = ae.getNetworkDrones()[0] or 0
-    if lvDrones < #ifaces then
-        log("[search] NOTE: only %d MK-I drone(s) in the network for %d interface(s).", lvDrones, #ifaces)
-        log("[search]       Detection needs ~1 per interface — add more MK-I drones if miners are missed.")
+    local minerCount = #miners
+    if lvDrones < 1 then
+        log("[search] WARNING: no MK-I drones in the network. Search will fail.")
+        log("[search]          Add MK-I drones to the buffer chest and try again.")
+    elseif lvDrones < minerCount then
+        log("[search] NOTE: only %d MK-I drone(s) in the network; Pass B needs %d (1 per miner).", lvDrones, minerCount)
+        log("[search]       Pass A will work (1 drone reused). Pass B may miss miners without enough drones.")
     end
 
     local ifaceByMiner    = linkInterfaces(ifaces, miners, redstones, dbAddr, items)
-    local redstoneByMiner = linkRedstones(ifaces, miners, redstones, dbAddr, items)
+
+    -- After Pass A each drone has been consumed by a miner bus or drained back
+    -- into the network. drainAll at the end of linkInterfaces clears the network.
+    -- Move all drones from the chest into the network again so Pass B can stock
+    -- every interface simultaneously.
+    log("[search] Re-priming network for Pass B...")
+    primeNetwork()
+
+    -- Detect the spare drone interface before Pass B so we can exclude it from
+    -- stocking (it would silently absorb a drone from the network if stocked).
+    local droneIfaceAddr
+    do
+        local used = {}
+        for _, ifAddr in pairs(ifaceByMiner) do used[ifAddr] = true end
+        for _, iface in ipairs(ifaces) do
+            if not used[iface.address] then droneIfaceAddr = iface.address; break end
+        end
+    end
+
+    local redstoneByMiner = linkRedstones(ifaces, miners, redstones, dbAddr, items, droneIfaceAddr)
 
     -- Join both passes on the miner address.
     local results = {}
