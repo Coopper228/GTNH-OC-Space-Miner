@@ -37,7 +37,7 @@ descriptor:
         drone_poll        = <field>drone_poll</field>,
 
         -- Drone buffer chest
-        drone_settle_time = <field>drone_settle_time</field>,
+        drone_op_timeout = <field>drone_op_timeout</field>,
 
         -- Search (auto-detection)
         search_stock_time = <field>search_stock_time</field>,
@@ -134,13 +134,13 @@ descriptor:
       description: "Timing for moving drones via the transposer."
       defaultOpen: false
       fields:
-        - key: drone_settle_time
+        - key: drone_op_timeout
           type: float
-          label: "AE2 settle time (seconds)"
-          description: "Wait for AE2 to import/export a drone through the interface."
-          default: 1.5
-          min: 0.1
-          step: 0.1
+          label: "Buffer op timeout (seconds)"
+          description: "Upper bound for inject/reclaim state polls (returns early on success)."
+          default: 2
+          min: 0.5
+          step: 0.5
 
     - key: search
       name: "Search (auto-detection)"

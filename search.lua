@@ -20,7 +20,7 @@
 -- Joining the two passes on the miner address yields the full triplet.
 
 local component = require("component")
-local equipment = require("equipment")
+local ae        = require("ae")
 local config    = require("config")
 
 local DEBUG = config.debug or false
@@ -334,15 +334,11 @@ function M.runSearch()
     local dbAddr = component.list("database")()
     if not dbAddr then error("[search] No Database Upgrade found!") end
 
-    local items = equipment.equipmentTable["LV"]
-    if not items then error("[search] LV equipment missing!") end
-
-    -- Write the LV test kit into the database and remember its slots.
-    local db = component.proxy(dbAddr)
-    for i, item in ipairs(items) do
-        db.set(i, item.id, item.damage or 0)
-        item.dbSlot = i
-    end
+    -- Use the shared LV test kit; dbSlots are already set by ae.initDatabase()
+    -- (main runs it before search). Do NOT re-write the database here — that
+    -- would clobber other tiers' slots.
+    local items = ae.equipment["LV"]
+    if not items or not items[1].dbSlot then error("[search] LV equipment not in database!") end
 
     local miners, ifaces, redstones = findComponents()
     log("[search] Found: %d interface(s), %d redstone I/O, %d miner(s)",

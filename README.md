@@ -1,28 +1,61 @@
 # GTNH-OC-Space-Miner
 
 OpenComputers controller for the GTNH **Space Elevator → Space Miner** modules.
-It auto-detects the miner hardware, keeps a configurable set of ores stocked
-from the ME network, and meters mining drones through a buffer chest so a
-single drone is delivered to each miner (no stackable-drone flooding).
+It auto-detects the hardware, keeps a configurable set of ores stocked from the
+ME network, and delivers exactly one mining drone to each miner via a buffer
+chest (so the Input Bus never floods with a whole stack of drones).
+
+Repository: `Coopper228/GTNH-OC-Space-Miner`
+
+## How it works
+
+### Item flow (redstone-driven)
+Each miner is fed by a pipe between its **ME Interface** and its **GT Input Bus**,
+switched by a **Redstone I/O** block:
+
+- signal **HIGH** → items flow ME Interface → Input Bus (miner runs)
+- signal **LOW** → the bus drains back into the ME Interface
+
+While a miner works the controller just holds the signal HIGH; AE2 keeps the
+interface stocked with drill tips and rods, which are consumables.
+
+### The drone problem & the buffer chest
+A miner needs exactly **one** drone, but drones are stackable. A stocked ME
+Interface would let the pipe pull a whole stack while the signal is HIGH, because
+AE2 refills the slot from the network as fast as the pipe empties it.
+
+The fix: **keep zero drones in the ME network at rest.** All drones live in a
+dedicated **buffer chest**. A single **transposer** moves drones between the chest
+and a dedicated **drone ME interface** wired into the network:
+
+```
+[ buffer chest ] -- transposer -- [ drone ME interface ] ~~ ME network
+```
+
+- **inject** (chest → interface → network): before a miner starts, exactly one
+  drone is pushed into the network. With only one present, the pipe physically
+  cannot pull more than one.
+- **reclaim** (network → interface → chest): after a job the drone drains back
+  into the network; each scan it is swept back to the chest. Self-healing.
+
+The chest is the single source of truth for "how many drones are available".
+All buffer operations verify against real chest/network reads — no blind delays.
 
 ## Hardware
 
 Per miner (auto-detected, no addresses to enter):
 
-- 1 GT Space Miner with an Adapter holding an **MFU** bound to it
-- 1 **Redstone I/O** under that Adapter
-- 1 **ME Interface** (its Adapter manages the interface)
-- A pipe whose direction is the redstone signal: HIGH = ME Interface → Input
-  Bus, LOW = Input Bus drains back into the ME Interface
+- GT Space Miner with an Adapter holding an **MFU** bound to it
+- a **Redstone I/O** block
+- an **ME Interface** + Adapter
+- a redstone-switched pipe between the interface and the miner's Input Bus
 
 Drone buffer (one of each in the whole system, auto-detected):
 
-- 1 **buffer chest** holding all mining drones
-- 1 **transposer** touching both the chest and a dedicated ME interface
-- 1 dedicated **drone ME interface** (+ its Adapter) wired into the network
-
-The drone interface is identified as the one ME interface not bound to any
-miner; the transposer's chest/interface sides are told apart automatically.
+- a **buffer chest** holding all mining drones
+- a **transposer** touching both the chest and the drone interface
+- a dedicated **drone ME interface** (+ Adapter) — the one ME interface not bound
+  to any miner
 
 ## Install (in-game)
 
@@ -34,16 +67,16 @@ pastebin run 8t6B7HC5
 
 Say **yes** to autorun so it launches on boot (writes `/home/.shrc` = `main`).
 
-Or install directly without the menu:
+Or install directly:
 
 ```
 wget -f https://github.com/Coopper228/GTNH-OC-Space-Miner/releases/latest/download/SpaceMiner.tar /home/program.tar
 cd /home && tar -xf program.tar && rm program.tar
 ```
 
-On first launch (no `/home/miners.lua`) it runs auto-detection. **Have your
-drones in the ME network during the first search** so the miners can light up;
-the program sweeps them into the buffer chest on the first scan afterwards.
+**First launch** runs auto-detection (`search`). For this to work, have your
+**drones in the ME network** (not the chest) so the miners can light up during
+detection. On the first scan afterwards the program reclaims them into the chest.
 
 ## Configure
 
@@ -53,69 +86,55 @@ Use the web configurator (no in-game editing needed):
 https://coopper228.github.io/GTNH-OC-Web-Configurator/#/configurator?url=https://raw.githubusercontent.com/Coopper228/GTNH-OC-Space-Miner/main/config-descriptor.yml
 ```
 
-Set the timings and the **ore targets** (label / target / priority), then
-download the generated `config.lua` to `/home` (or use the `wget` link it
-produces). Only ores listed there are mined. Hardware is never configured by
-hand — it is auto-detected into `/home/miners.lua`.
+Set the timings and the **ore targets** (label / target / priority), download the
+generated `config.lua` to `/home`, and restart. **Only ores listed in
+`ore_targets` are mined** — an empty list means nothing is mined. Hardware is
+never configured by hand; it lives in `/home/miners.lua`.
 
-You can still edit `/home/config.lua` directly; the schema lives in
-`config-descriptor.yml`.
+## Troubleshooting the drone buffer
 
-## Auto-update
+Set `debug = true` in `config.lua` and restart. At startup you'll get a
+`[diag]` report of the buffer:
 
-On startup `updater.lua` checks `version.lua` on the repo's `main` branch. If a
-newer `programVersion` exists it offers to update: it downloads the latest
-release tar, preserves your `config.lua` (backed up to `config.old.lua`), and
-reboots. If `configVersion` was bumped the old config is kept and you are asked
-to rewrite `config.lua` first. Offline machines simply skip the check.
+- the transposer address and the chest / interface sides (name + slot count)
+- how many drones the transposer sees **in the chest**, per tier
+- how many drones are **in the network** (these get reclaimed)
+
+Common issues:
+
+| Symptom | Likely cause |
+|---|---|
+| `[diag] chest: NO drones` but the chest is full | wrong chest side, or drone item-name mismatch — check the `[diag]` sides |
+| Drones never move from network to chest | reclaim can't stock the drone interface — verify the spare interface is the drone interface and the transposer faces it |
+| Nothing is ever mined | `ore_targets` is empty, or no drones of a viable tier are in the chest |
+| `miner did not start` | the per-miner pipe/redstone/interface link is wrong — re-run search (delete `/home/miners.lua`) |
 
 ## Releasing (maintainer)
 
-1. Bump `programVersion` in `version.lua` (and `configVersion` only if the
-   config format changed incompatibly).
-2. Tag and push:
+1. Bump `programVersion` in `version.lua` (and `configVersion` only if the config
+   format changed incompatibly).
+2. Tag and push, or run the Release workflow manually:
    ```
-   git tag v1.0.1 && git push origin v1.0.1
+   git tag v1.1.0 && git push origin v1.1.0
    ```
-   The `Release` GitHub Action packs all root `*.lua` files into
-   `SpaceMiner.tar` and attaches it to the release.
+   The Action packs all root `*.lua` into `SpaceMiner.tar` and attaches it to the
+   release. The installer and self-updater download
+   `releases/latest/download/SpaceMiner.tar`.
 
-## Register in the installer
+## Files
 
-Add this to the installer's `programs.yml`
-(https://github.com/Navatusein/GTNH-OC-Installer) via PR, or host your own fork:
-
-```yaml
-- name: Space Miner
-  description: Automated GTNH Space Elevator space mining controller
-  archiveUrl: https://github.com/Coopper228/GTNH-OC-Space-Miner/releases/latest/download/SpaceMiner.tar
-  configDescriptorUrl: https://raw.githubusercontent.com/Coopper228/GTNH-OC-Space-Miner/main/config-descriptor.yml
-```
-
-And the legacy `programs.lua`:
-
-```lua
-{
-  name = "Space Miner",
-  description = "Automated GTNH Space Elevator space mining controller",
-  url = "https://github.com/Coopper228/GTNH-OC-Space-Miner/releases/latest/download/SpaceMiner.tar"
-}
-```
-
-## Repository layout
-
-All program files live at the **repo root** (flat), because the tar is extracted
-straight into `/home`:
+All program files live at the **repo root** (flat) — the tar is extracted into
+`/home`:
 
 ```
-main.lua  config.lua  asteroids.lua  mining.lua  scheduler.lua  search.lua
-lookup.lua  equipment.lua  dronebuffer.lua  updater.lua  version.lua
-config-descriptor.yml          # web configurator schema (root, raw-fetched)
-version.lua                     # current version (root, raw-fetched)
-.github/workflows/release.yml   # release builder
+main.lua        entry point + main loop
+config.lua      settings (web-generated)
+version.lua     current version (raw-fetched by the updater)
+updater.lua     self-update from GitHub
+asteroids.lua   static data: drone chance tables + ore catalog
+ae.lua          ME/AE2 layer: equipment, database, network queries
+mining.lua      drone buffer + scheduler + per-miner state machine
+search.lua      one-time hardware auto-detection
+config-descriptor.yml      web configurator schema (raw-fetched)
+.github/workflows/release.yml
 ```
-
-`asteroids.lua` holds all per-asteroid static data: the drone chance/distance
-tables for each miner tier and the ore catalog (merged from the former
-`asteroids_mk1/2/3.lua` and `ores.lua`).
-

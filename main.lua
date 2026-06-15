@@ -10,26 +10,21 @@
 
 -- Clear module cache so edits to any file take effect without reboot.
 for _, mod in ipairs({
-    "config", "asteroids", "version", "updater",
-    "equipment", "lookup", "scheduler", "dronebuffer", "mining", "search",
+    "config", "asteroids", "version", "updater", "ae", "mining", "search",
 }) do
     package.loaded[mod] = nil
 end
 
-local component  = require("component")
 local event      = require("event")
 local filesystem = require("filesystem")
 local term       = require("term")
 
-local config      = require("config")
-local asteroids   = require("asteroids")
-local updater     = require("updater")
-local equipment   = require("equipment")
-local lookup      = require("lookup")
-local scheduler   = require("scheduler")
-local dronebuffer = require("dronebuffer")
-local mining      = require("mining")
-local search      = require("search")
+local config    = require("config")
+local asteroids = require("asteroids")
+local updater   = require("updater")
+local ae        = require("ae")
+local mining    = require("mining")
+local search    = require("search")
 
 -- ─── CONFIG ───────────────────────────────────────────────────────────────────
 local ME_SCAN_INTERVAL = config.me_scan_interval or 60
@@ -53,7 +48,7 @@ updater.check()
 
 -- ── 1. SETUP ──────────────────────────────────────────────────────────────────
 
-local dbAddr = equipment.initDatabase()
+local dbAddr = ae.initDatabase()
 
 -- A saved config is valid only if it carries both the miner triplets and the
 -- drone-buffer topology in the current format. An older config (a flat miner
@@ -117,8 +112,7 @@ end
 
 local chanceTables = asteroids.chances
 
-dronebuffer.init(droneConfig, dbAddr)
-mining.init(minerList, dbAddr)
+mining.init(minerList, dbAddr, droneConfig)
 print()
 print(string.format("[main] Tracking %d ore entries across %d asteroid types.",
     #lookupList, (function()
@@ -144,15 +138,14 @@ while running do
     if meTimer > ME_SCAN_INTERVAL then
         meTimer = 0
 
-        -- Sweep any drones that drained back into the network (finished/aborted
+        -- Reclaim any drones that drained back into the network (finished/aborted
         -- jobs) into the buffer chest FIRST, so the network is empty again and
         -- the chest count below is accurate. Must run before assignments so a
-        -- drone injected later this round is never vacuumed.
-        dronebuffer.vacuum(lookup.getAllDrones())
+        -- drone injected later this round is never reclaimed.
+        mining.reclaim()
 
         -- The buffer chest is the source of truth for available drones.
-        local rawDrones = dronebuffer.countDrones()
-        voltCache = scheduler.buildVoltageCache(rawDrones)
+        voltCache = mining.buildVoltageCache(mining.countDrones())
 
         if DEBUG then
             local parts = {}
@@ -165,11 +158,11 @@ while running do
 
         if #lookupList > 0 then
             if mining.hasFreeMiners() then
-                oreAmounts = lookup.scanOreAmounts(lookupList)
+                oreAmounts = ae.scanOreAmounts(lookupList)
             else
                 local busy = mining.getBusyAsteroids()
                 if #busy > 0 then
-                    oreAmounts = lookup.scanOreAmountsFor(lookupList, busy)
+                    oreAmounts = ae.scanOreAmountsFor(lookupList, busy)
                 else
                     oreAmounts = {}
                 end
@@ -188,7 +181,7 @@ while running do
         -- ── 2b. Assign idle miners ────────────────────────────────────────────
         if mining.hasFreeMiners() and #lookupList > 0 then
             local idle        = mining.getIdleMiners()
-            local assignments = scheduler.assignJobs(
+            local assignments = mining.assignJobs(
                 idle, voltCache, oreAmounts, oresByAsteroid, chanceTables)
 
             if #assignments > 0 then
@@ -198,7 +191,7 @@ while running do
         end
 
         -- ── 2c. Sleep when nothing to do ─────────────────────────────────────
-        if scheduler.allTargetsMet(oreAmounts) and #mining.getBusyAsteroids() == 0 then
+        if mining.allTargetsMet(oreAmounts) and #mining.getBusyAsteroids() == 0 then
             print(string.format("[ZZZ] All targets met. Sleeping %ds...", IDLE_SLEEP))
             os.sleep(IDLE_SLEEP)
             meTimer = ME_SCAN_INTERVAL + 1
