@@ -78,6 +78,7 @@ local function ensureTarUtility()
     local filesystem = require("filesystem")
     local shell      = require("shell")
     if filesystem.exists("/bin/tar.lua") then return end
+    if not filesystem.exists("/usr/man") then filesystem.makeDirectory("/usr/man") end
     shell.setWorkingDirectory("/usr/man")
     shell.execute("wget -fq " .. TAR_MAN_URL)
     shell.setWorkingDirectory("/bin")

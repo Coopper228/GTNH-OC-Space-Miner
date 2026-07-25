@@ -67,15 +67,19 @@ function M.initDatabase()
 end
 
 -- ME controller proxy (lazily; errors only if actually used without one).
-local me = (function()
-    local addr = component.list("me_controller")()
-    if not addr then error("[ae] ME Controller not found!") end
-    return component.proxy(addr)
-end)()
+local me
+local function getMe()
+    if not me then
+        local addr = component.list("me_controller")()
+        if not addr then error("[ae] ME Controller not found!") end
+        me = component.proxy(addr)
+    end
+    return me
+end
 
 -- Total count of an item in the network, by localized label.
 function M.getCurrentAmount(label)
-    local items = me.getItemsInNetwork({ label = label }) or {}
+    local items = getMe().getItemsInNetwork({ label = label }) or {}
     local total = 0
     for _, item in ipairs(items) do total = total + (item.size or 0) end
     return total
@@ -84,7 +88,7 @@ end
 -- All mining drones currently in the network, as { [damage] = count }.
 function M.getNetworkDrones()
     local result = {}
-    local items  = me.getItemsInNetwork({ name = M.DRONE_ITEM }) or {}
+    local items  = getMe().getItemsInNetwork({ name = M.DRONE_ITEM }) or {}
     for _, item in ipairs(items) do
         local dmg = item.damage or 0
         result[dmg] = (result[dmg] or 0) + (item.size or 0)

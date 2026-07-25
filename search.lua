@@ -180,6 +180,15 @@ local function linkInterfaces(ifaces, miners, redstones, dbAddr, items)
             io.write(m.name .. "\n")
             ifaceByMiner[m.address] = iface.address
             linked[m.address]       = true
+
+            -- The test drone sits inside the machine until its cycle ends. Wait
+            -- for the cycle to finish, otherwise the drone cannot drain back
+            -- into the network and every remaining interface in this pass would
+            -- report "no miner activated".
+            local waited = 0
+            while m.proxy.isMachineActive() and waited < 300 do
+                os.sleep(0.2); waited = waited + 0.2
+            end
         else
             io.write("no miner activated\n")
         end
@@ -298,8 +307,7 @@ local function classifySides(tp)
     return chestSide, ifaceSide, #invSides
 end
 
-local function detectDroneBuffer(ifaces, results)
-    -- The drone interface is the one ME interface not bound to any miner.
+local function detectDroneBuffer(ifaces, results, tpAddr, chestSide, ifaceSide)
     local used = {}
     for _, r in ipairs(results) do used[r.meInterfaceAddress] = true end
     local spare = {}
@@ -311,83 +319,49 @@ local function detectDroneBuffer(ifaces, results)
         log("[search]          buffer, found %d. Drone buffer NOT configured.", #spare)
         return nil
     end
-    local droneIface = spare[1]
-
-    -- There should be exactly one transposer in the whole system.
-    local tpAddr
-    for addr in component.list("transposer") do
-        if tpAddr then
-            log("[search] WARNING: multiple transposers found; using the first.")
-            break
-        end
-        tpAddr = addr
-    end
-    if not tpAddr then
-        log("[search] WARNING: no transposer found. Drone buffer NOT configured.")
-        return nil
-    end
-
-    local chestSide, ifaceSide, nInv = classifySides(component.proxy(tpAddr))
-    if not chestSide or not ifaceSide then
-        log("[search] WARNING: could not identify chest/interface sides on the")
-        log("[search]          transposer (found %d adjacent inventories). Check the build.", nInv)
-        return nil
-    end
 
     return {
         transposer    = tpAddr,
-        interface     = droneIface,
+        interface     = spare[1],
         chestSide     = chestSide,
         interfaceSide = ifaceSide,
     }
 end
 
--- Move exactly `need` LV drones into the ME network for detection passes.
--- Already-in-network drones count toward the target so we never overshoot.
--- Moving the minimum avoids the flood: with >1 drone in the network, a stocked
--- ME Interface (count=1) acts as a pump — AE2 keeps refilling the slot the
--- instant the pipe drains it, emptying the entire network into one bus.
-local function primeNetwork(need)
-    local tpAddr
-    for addr in component.list("transposer") do tpAddr = addr; break end
-    if not tpAddr then
-        log("[search] WARNING: no transposer — put drones in the ME network manually before search.")
-        return
-    end
+-- Move exactly `need` LV drones from the buffer chest into the drone interface
+-- (AE2 imports them into the network). Excess drones in the chest stay there.
+-- We deliberately do NOT query the ME network — it may contain the user's own
+-- drone stock which is irrelevant here. We only care about what we physically
+-- moved via the transposer.
+local function primeNetwork(tp, chestSide, ifaceSide, need)
+    local LV_DAMAGE = 0   -- MK-I drone damage value
 
-    local tp = component.proxy(tpAddr)
-    local chestSide, ifaceSide = classifySides(tp)
-    if not chestSide or not ifaceSide then
-        log("[search] WARNING: can't identify chest/interface sides — put drones in the ME network manually.")
-        return
-    end
-
-    -- Count drones already in the network so we don't overshoot.
-    local inNet = 0
-    for _, c in pairs(ae.getNetworkDrones()) do inNet = inNet + c end
-    local toMove = need - inNet
-    if toMove <= 0 then
-        log("[search] Network already has %d drone(s) (need %d). Skipping prime.", inNet, need)
-        return
+    -- First, pull back into the chest any LV drones already sitting in the
+    -- drone interface slot (leftover from a previous aborted search).
+    local ifaceStack = tp.getStackInSlot(ifaceSide, 1)
+    if ifaceStack and ifaceStack.name == ae.DRONE_ITEM and (ifaceStack.damage or 0) == LV_DAMAGE then
+        tp.transferItem(ifaceSide, chestSide, 64, 1)
     end
 
     local moved = 0
     local size = tp.getInventorySize(chestSide)
     for slot = 1, size do
-        if moved >= toMove then break end
+        if moved >= need then break end
         local st = tp.getStackInSlot(chestSide, slot)
-        if st and st.name == ae.DRONE_ITEM then
-            local want = math.min(toMove - moved, st.size or 1)
+        if st and st.name == ae.DRONE_ITEM and (st.damage or 0) == LV_DAMAGE then
+            local want = math.min(need - moved, st.size or 1)
             moved = moved + (tp.transferItem(chestSide, ifaceSide, want, slot) or 0)
         end
     end
 
     if moved > 0 then
-        log("[search] Moved %d drone(s) into the network (need %d for detection).", moved, need)
+        log("[search] Moved %d LV drone(s) into the network (need %d).", moved, need)
         os.sleep(1)
-    elseif inNet == 0 then
-        log("[search] WARNING: no LV drones in chest or network — detection will fail.")
     end
+    if moved < need then
+        log("[search] WARNING: only %d / %d LV drones available in the buffer chest.", moved, need)
+    end
+    return moved
 end
 
 -- ── Entry point ───────────────────────────────────────────────────────────────
@@ -396,9 +370,6 @@ function M.runSearch()
     local dbAddr = component.list("database")()
     if not dbAddr then error("[search] No Database Upgrade found!") end
 
-    -- Use the shared LV test kit; dbSlots are already set by ae.initDatabase()
-    -- (main runs it before search). Do NOT re-write the database here — that
-    -- would clobber other tiers' slots.
     local items = ae.equipment["LV"]
     if not items or not items[1].dbSlot then error("[search] LV equipment not in database!") end
 
@@ -410,33 +381,64 @@ function M.runSearch()
     if #ifaces == 0    then log("[search] ERROR: No ME Interfaces found.");          return end
     if #redstones == 0 then log("[search] ERROR: No Redstone I/O blocks found.");    return end
 
-    -- Full cleanup before starting: clear every interface and drop every signal
-    -- so all Input Buses drain back into their ME Interfaces.
+    -- Find the transposer once; pass it explicitly so primeNetwork never touches
+    -- the ME network query (which sees the user's whole drone stock).
+    local tpAddr
+    for addr in component.list("transposer") do tpAddr = addr; break end
+    if not tpAddr then error("[search] No transposer found!") end
+    local tp = component.proxy(tpAddr)
+    local chestSide, ifaceSide, nInv = classifySides(tp)
+    if not chestSide or not ifaceSide then
+        error(string.format("[search] Can't identify chest/iface sides on transposer (%d inventories found).", nInv))
+    end
+
     log("[search] Deactivating all Redstone I/O and clearing interfaces...")
     drainAll(ifaces, redstones)
 
-    -- Pass A reuses exactly 1 drone across all iterations (drain between each).
-    -- Pass B needs 1 drone per miner simultaneously.
-    local minerCount = #miners
-    log("[search] Priming network with 1 drone for Pass A...")
-    primeNetwork(1)
-
-    local lvDrones = ae.getNetworkDrones()[0] or 0
-    if lvDrones < 1 then
-        log("[search] ERROR: no MK-I drones available. Add drones to the buffer chest and retry.")
+    -- ── Pass A: 1 drone, reused across all iterations via drain ──────────────
+    log("[search] Priming 1 LV drone for Pass A...")
+    local got = primeNetwork(tp, chestSide, ifaceSide, 1)
+    if got < 1 then
+        log("[search] ERROR: no LV drones in buffer chest. Add MK-I drones and retry.")
         return
     end
 
     local ifaceByMiner = linkInterfaces(ifaces, miners, redstones, dbAddr, items)
 
-    -- After Pass A the 1 drone is back in the network (returned via drain).
-    -- Prime network up to minerCount so Pass B can stock every miner interface
-    -- simultaneously without flooding any single bus.
-    log("[search] Re-priming network with %d drone(s) for Pass B...", minerCount)
-    primeNetwork(minerCount)
+    -- drainAll at the end of linkInterfaces dropped all signals. The single LV
+    -- drone drained from a miner bus back into that miner's ME Interface, and
+    -- AE2 re-imported it into the network. Pull it back to the chest via the
+    -- drone interface so Pass B starts with a clean chest count.
+    do
+        local droneIface
+        do
+            local used = {}
+            for _, ifAddr in pairs(ifaceByMiner) do used[ifAddr] = true end
+            for _, iface in ipairs(ifaces) do
+                if not used[iface.address] then droneIface = iface.proxy; break end
+            end
+        end
+        if droneIface and items[1].dbSlot then
+            droneIface.setInterfaceConfiguration(1, dbAddr, items[1].dbSlot, 64)
+            os.sleep(1)
+            tp.transferItem(ifaceSide, chestSide, 64, 1)
+            droneIface.setInterfaceConfiguration(1)
+        end
+    end
 
-    -- Detect the spare drone interface before Pass B so we can exclude it from
-    -- stocking (it would silently absorb a drone from the network if stocked).
+    -- ── Pass B: 1 drone per miner, all interfaces stocked simultaneously ──────
+    local minerCount = #miners
+    log("[search] Priming %d LV drone(s) for Pass B...", minerCount)
+    got = primeNetwork(tp, chestSide, ifaceSide, minerCount)
+    if got < 1 then
+        log("[search] ERROR: no LV drones available for Pass B.")
+        return
+    end
+    if got < minerCount then
+        log("[search] NOTE: only %d / %d drones available; some miners may be missed.", got, minerCount)
+    end
+
+    -- Exclude the spare drone interface from Pass B stocking.
     local droneIfaceAddr
     do
         local used = {}
@@ -448,7 +450,18 @@ function M.runSearch()
 
     local redstoneByMiner = linkRedstones(ifaces, miners, redstones, dbAddr, items, droneIfaceAddr)
 
-    -- Join both passes on the miner address.
+    -- Pull any remaining drones from the network back to the chest via the drone
+    -- interface before saving config (mining.init's reclaim() will do the same
+    -- on startup, but doing it here leaves the system in the expected state).
+    if droneIfaceAddr and items[1].dbSlot then
+        local droneIface = component.proxy(droneIfaceAddr)
+        droneIface.setInterfaceConfiguration(1, dbAddr, items[1].dbSlot, 64)
+        os.sleep(1)
+        tp.transferItem(ifaceSide, chestSide, 64, 1)
+        droneIface.setInterfaceConfiguration(1)
+    end
+
+    -- ── Join both passes on miner address ────────────────────────────────────
     local results = {}
     for _, m in ipairs(miners) do
         local ifA = ifaceByMiner[m.address]
@@ -473,7 +486,7 @@ function M.runSearch()
         return
     end
 
-    local drone = detectDroneBuffer(ifaces, results)
+    local drone = detectDroneBuffer(ifaces, results, tpAddr, chestSide, ifaceSide)
     if not drone then
         log("[search] Config NOT saved (drone buffer missing). Fix the transposer/")
         log("[search] chest/drone-interface and re-run search.")

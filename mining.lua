@@ -24,6 +24,7 @@ local DRAIN_TICKS = math.max(1, math.floor((config.drain_time or 4) * 2))
 local DRONE_LOAD  = config.drone_load_time or 6
 local DRONE_POLL  = config.drone_poll or 0.05
 local OP_TIMEOUT  = config.drone_op_timeout or 2     -- upper bound for buffer polls
+local STALL_TICKS = 20                               -- 10s of inactivity before a WORKING miner is released
 
 local SLOT_DRONE, SLOT_TIP, SLOT_ROD = 1, 2, 3
 local STOCK_TIP, STOCK_ROD = 64, 64
@@ -117,7 +118,9 @@ local function reclaim()
             local dbSlot = buf.damageToDb[dmg]
             if not dbSlot then
                 dbg("reclaim: no db slot for drone damage %d", dmg)
-                progressed = true   -- don't stall the loop on unknown tiers
+                -- Unknown tier: it can never be reclaimed, so it must NOT count
+                -- as progress, otherwise the loop would spin all 16 rounds
+                -- re-querying the ME network for drones it cannot move.
             else
                 buf.iface.setInterfaceConfiguration(SLOT_DRONE, buf.dbAddr, dbSlot, 64)
 
@@ -188,9 +191,24 @@ M.reclaim     = reclaim
 
 -- ═══════════════════════════════════ SCHEDULER ════════════════════════════════
 --
--- Score(asteroid) = Σ deficitFraction(ore) × priority. Each idle miner is sent
--- to the highest-scoring asteroid it has a viable drone for (best = highest
--- chance%). Several miners may pile onto the same top asteroid.
+-- Expected-yield greedy assignment, considering all three signals at once:
+--
+--   need S(a) = Σ deficitFraction(ore) × priority(ore)          (what to mine)
+--       deficitFraction = (target - current) / target, so an ore at 0% pulls
+--       much harder than one at 90% — deficits stay balanced instead of one
+--       ore being mined to 100% while another sits empty.
+--
+--   candidate (idle miner, asteroid, drone tier) value:
+--       value = S(a) / (1 + minersOn(a)) × chance
+--   i.e. the expected priority-weighted deficit repaid per cycle. The 1/(1+n)
+--   factor (n = miners already working or just assigned there) spreads miners
+--   across asteroids of comparable need instead of piling everyone onto the
+--   single top one — yet piling still happens when one asteroid dominates.
+--
+-- Candidates are taken greedily, best value first. For a fixed asteroid the
+-- value grows with chance, so a miner always digs in its maximum-chance
+-- configuration; ties prefer the higher chance, then the cheaper drone tier
+-- (rare high-tier drones are preserved when a cheaper one does the same job).
 
 -- chest drone counts (by damage) -> per-voltage availability.
 function M.buildVoltageCache(dronesByDamage)
@@ -213,53 +231,85 @@ local function oreDeficitScore(asteroidOres, oreAmounts)
     return total
 end
 
-local function bestDrone(chanceTable, asteroidName, voltageCache)
-    local entry = chanceTable[asteroidName]
-    if not entry then return nil end
-    local bestChance, bestVoltage, bestDistance = -1, nil, nil
-    for voltage, info in pairs(entry) do
-        if (voltageCache[voltage] or 0) > 0 and info.chance > bestChance then
-            bestChance, bestVoltage, bestDistance = info.chance, voltage, info.distance
-        end
-    end
-    if bestVoltage then
-        return { voltage = bestVoltage, distance = bestDistance, chance = bestChance }
-    end
-    return nil
+-- Drone tier rank (lower = cheaper), derived from the damage->voltage map.
+local TIER_RANK = {}
+for dmg, voltage in pairs(ae.voltageOfDamage) do
+    TIER_RANK[voltage] = dmg
 end
 
 function M.assignJobs(idleMiners, voltageCache, oreAmounts, oresByAsteroid, chanceTables)
     if #idleMiners == 0 then return {} end
 
-    local scored = {}
+    -- Base need per asteroid; only asteroids with a real deficit compete.
+    local score, any = {}, false
     for asteroid, ores in pairs(oresByAsteroid) do
         local s = oreDeficitScore(ores, oreAmounts)
-        if s > 0 then scored[#scored + 1] = { name = asteroid, score = s } end
+        if s > 0 then score[asteroid] = s; any = true end
     end
-    if #scored == 0 then return {} end
-    table.sort(scored, function(a, b) return a.score > b.score end)
+    if not any then return {} end
 
     local drones = {}
     for v, c in pairs(voltageCache) do drones[v] = c end
 
+    -- Diminishing-returns counters, seeded with miners already holding a job.
+    local minersOn = {}
+    for _, a in ipairs(M.getBusyAsteroids()) do
+        minersOn[a] = (minersOn[a] or 0) + 1
+    end
+
+    local free = {}
+    for i, m in ipairs(idleMiners) do free[i] = m end
+
     local assignments = {}
-    for _, miner in ipairs(idleMiners) do
-        local ct = chanceTables[miner.data.minerLevel]
-        if ct then
-            for _, s in ipairs(scored) do
-                local drone = bestDrone(ct, s.name, drones)
-                if drone then
-                    assignments[#assignments + 1] = {
-                        miner = miner, asteroid = s.name,
-                        voltage = drone.voltage, distance = drone.distance, chance = drone.chance,
-                    }
-                    drones[drone.voltage] = drones[drone.voltage] - 1
-                    dbg("assign %s -> %s  drone=%s  %.1f%%",
-                        miner.data.minerLevel, s.name, drone.voltage, drone.chance)
-                    break
+    while #free > 0 do
+        local best
+        for idx, miner in ipairs(free) do
+            local ct = chanceTables[miner.data.minerLevel]
+            if ct then
+                for asteroid, s in pairs(score) do
+                    local entry = ct[asteroid]
+                    if entry then
+                        local eff = s / (1 + (minersOn[asteroid] or 0))
+                        for voltage, info in pairs(entry) do
+                            if (drones[voltage] or 0) > 0 then
+                                local value = eff * info.chance
+                                local better = false
+                                if not best or value > best.value + 1e-9 then
+                                    better = true
+                                elseif value > best.value - 1e-9 then
+                                    -- Value tie: prefer the higher chance,
+                                    -- then the cheaper drone tier.
+                                    if info.chance > best.chance + 1e-9 then
+                                        better = true
+                                    elseif info.chance > best.chance - 1e-9
+                                            and (TIER_RANK[voltage] or 0) < (TIER_RANK[best.voltage] or 0) then
+                                        better = true
+                                    end
+                                end
+                                if better then
+                                    best = {
+                                        minerIdx = idx, miner = miner, asteroid = asteroid,
+                                        voltage = voltage, distance = info.distance,
+                                        chance = info.chance, value = value,
+                                    }
+                                end
+                            end
+                        end
+                    end
                 end
             end
         end
+        if not best then break end
+
+        assignments[#assignments + 1] = {
+            miner = best.miner, asteroid = best.asteroid,
+            voltage = best.voltage, distance = best.distance, chance = best.chance,
+        }
+        drones[best.voltage] = drones[best.voltage] - 1
+        minersOn[best.asteroid] = (minersOn[best.asteroid] or 0) + 1
+        table.remove(free, best.minerIdx)
+        dbg("assign %s -> %s  drone=%s  %.1f%%  value=%.2f",
+            best.miner.data.minerLevel, best.asteroid, best.voltage, best.chance, best.value)
     end
     return assignments
 end
@@ -420,6 +470,21 @@ function M.tick(oreAmounts, oresByAsteroid)
                 configureInterface(miner, nil)
                 miner.state, miner.timer = "STOPPING", 0
                 dbg("%s WORKING->STOPPING  %s", mid(miner), miner.currentJob.asteroid)
+            elseif not miner.proxies.machine.isMachineActive() then
+                -- The machine stopped on its own (drone broke, supplies ran dry,
+                -- manual interruption). Give it a grace period, then release the
+                -- miner so the scheduler can restart it with a fresh drone --
+                -- otherwise it stays WORKING forever and blocks its asteroid.
+                miner.timer = miner.timer + 1
+                if miner.timer >= STALL_TICKS then
+                    print(string.format("[WARN] %s stopped by itself -- releasing.", mid(miner)))
+                    setSignal(miner, 0)
+                    configureInterface(miner, nil)
+                    miner.state, miner.timer = "STOPPING", 0
+                    dbg("%s WORKING->STOPPING (stalled)", mid(miner))
+                end
+            else
+                miner.timer = 0
             end
         elseif miner.state == "STOPPING" then
             miner.timer = miner.timer + 1
